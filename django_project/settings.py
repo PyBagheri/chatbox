@@ -44,6 +44,8 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     
     'rest_framework',
+    
+    'chatbox',
 ]
 
 MIDDLEWARE = [
@@ -132,3 +134,44 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.0/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+
+
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        # Currently 'chatbox' only works with session authentication.
+        'rest_framework.authentication.SessionAuthentication'
+    ],
+    
+    'DEFAULT_PARSER_CLASSES': [
+        # Currently 'chatbox' only works with JSON.
+        'rest_framework.parsers.JSONParser'
+    ],
+        
+    'DEFAULT_RENDERER_CLASSES': [
+        # Currently 'chatbox' only works with JSON.
+        'rest_framework.renderers.JSONRenderer'
+    ]
+}
+
+
+CHATBOX = {
+    # These are the default values which are hard-coded in the app.
+    # We mentioned them here as a hint and a reference to what keys
+    # exist for settings.
+    
+    'USER_ID_FIELD': 'id',
+    
+    'MESSAGE_TEXT_MAX_LENGTH': 5000,
+    
+    'MESSAGE_DEFAULT_PAGE_SIZE': 20,
+    'MESSAGE_MAX_PAGE_SIZE': 200,
+    
+    'CHAT_DEFAULT_PAGE_SIZE': 40,
+    'CHAT_MAX_PAGE_SIZE': 200,
+    
+    'GROUP_NAME_MAX_LENGTH': 100,
+    
+    'UPLOADED_FILENAME_MAX_LENGTH': 100,
+    'UPLOADED_FILES_RELATIVE_PATH': 'chatbox/',
+}
