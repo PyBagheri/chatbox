@@ -298,7 +298,10 @@ class ChatSerializer(ChatBoxModelSerializer):
     separate serializers upon write for each chat type.
     """
     
-    last_message = ChatMessageSerializer()
+    # Since we specified this field explicitly, we must include
+    # `read_only=True` ourselves and `Meta.read_only_fields` won't
+    # make a difference for it.
+    last_message = ChatMessageSerializer(read_only=True)
     
     class Meta:
         model = Chat
