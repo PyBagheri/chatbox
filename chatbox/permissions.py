@@ -46,6 +46,13 @@ class CoMemberMessagePerms(permissions.BasePermission):
         
         # ----- NON-SAFE METHODS -----
         
+        # Currently, service messages cannot be deleted or edited.
+        # This might change later.
+        if message.service_action is not None:
+            return False
+        
+        # ----- NON-SERVICE MESSAGE -----
+        
         # The author of the message has all the permissions.
         if message.user == request.user:
             return True

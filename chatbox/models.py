@@ -37,7 +37,6 @@ class Chat(models.Model):
         if self.chat_type != Chat.ChatTypeChoices.MUTUAL:
             raise RuntimeError("'get_peer()' can only be used on mutual chats")
         
-        
         return self.members.exclude(pk=user.pk).first()
 
     objects = ChatManager.from_queryset(ChatQuerySet)()
@@ -134,6 +133,9 @@ def string_not_empty(string):
 
 
 class Message(models.Model):
+    class ServiceMessageActionChoices(models.TextChoices):
+        CREATE_CHAT = 'CC', 'Create Chat'
+    
     class Meta:
         indexes = [
             # Use cases:
@@ -150,8 +152,10 @@ class Message(models.Model):
     # we sort them using their sequential ID.
     message_id = models.UUIDField(unique=True, default=uuid.uuid4)
     
-    # In case a user is deleted, we want to keep their messages
-    # as from a "ghost" user.
+    # The cases where `user` might be blank:
+    # 1. If the user is deleted, we want to keep their messages
+    #    as from a "ghost" user.
+    # 2. A service message *might* not have a user.
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
                              blank=True, null=True)
     
@@ -171,5 +175,9 @@ class Message(models.Model):
         max_length=chatbox_settings.MESSAGE_TEXT_MAX_LENGTH,
         blank=True, null=True, validators=[string_not_empty]  #################### test
     )
+    
+    # Similar to Telegram's service message actions.
+    service_action = models.CharField(choices=ServiceMessageActionChoices, max_length=2,
+                                      blank=True, null=True)
 
     objects = models.Manager.from_queryset(MessageQuerySet)()

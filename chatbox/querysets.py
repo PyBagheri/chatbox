@@ -197,36 +197,31 @@ class ChatQuerySet(AdvancedQuerySet):
         if include_user:
             backward_annotation_relations.append('message__user')
         
-        
-        # TODO: This must be optimized (which will most likely need
-        # a serious change).
-        return self.annotate(
-            r=models.Window(
-                # By specifying the `message` in the `order_by` part, Django does
-                # a LEFT OUTER JOIN from the chat to the messages in that chat,
-                # which will cause the chat rows to be duplicated to cover all
-                # the messages. Then we order the messages from the newest to the
-                # oldest, and then use the first row in each 'window' (=similar
-                # to group; note that here each window represents a chat), which
-                # will be the chat that has its last message attached (=JOIN'ed)
-                # to it.
-                expression=models.functions.RowNumber(),
-                
-                # Similar to group by chat.
-                partition_by='id',
-                
-                # The order is from the newest to the oldest.
-                # In case the messages have the same timestamp,
-                # we use their UUID to order them.
-                order_by=('-message__sent_at', '-message__message_id')
+        # Every chat has at least one message: the service message
+        # for creating the chat. With the use of this fact, the query
+        # for retrieving the chats along with their last messages
+        # (and possibly ordering them) is greatly simplified and also
+        # optimized (with the help of a proper index on messages).
+        #
+        # By specifying a filter on the backward relation `message`,
+        # Django will perform a LEFT OUTER JOIN from the chat to the
+        # messages in that chat, which will cause the chat rows to be
+        # duplicated to cover all the messages, but only one row will
+        # be returned per chat (the one attached to its last message)
+        # by the use of the specified condition.
+        return self.filter(
+            message=models.Subquery(
+                chatbox.models.Message.objects.filter(
+                    chat=models.OuterRef('pk')
+                ).order_by('-sent_at', '-message_id').only('pk')[:1]
             )
-        ).filter(r=1).annotate_backward_related(
+        ).annotate_backward_related(
             *backward_annotation_relations,
             
             # Use the label `last_message` for the backward-related `message`.
             message='last_message',
         )
-
+        
 
 class MessageQuerySet(models.QuerySet):
     def for_user(self, user):
