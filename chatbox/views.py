@@ -70,6 +70,13 @@ class ChatMessageViewSet(
 
     def perform_create(self, serializer):
         serializer.save(chat=self.kwargs['chat'], user=self.request.user)
+    
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        serializer = ExpandUserChatPeerQueryParams(data=self.request.query_params)
+        serializer.is_valid(raise_exception=True)
+        context['query_params'] = serializer.validated_data
+        return context
 
 
 class ChatViewSet(viewsets.ModelViewSet):
