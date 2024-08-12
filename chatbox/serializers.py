@@ -138,17 +138,23 @@ class MessageSerializer(ChatBoxModelSerializer):
     user = serializers.ReadOnlyField(source=f"user.{chatbox_settings.USER_ID_FIELD}")
     chat = serializers.ReadOnlyField(source='chat.chat_id')
     
+    # TODO: fix and finish this.
+    # file_data = serializers.SlugRelatedField(...)
+    
     class Meta:
         model = Message
-        fields = ['message_id', 'user', 'chat', 'sent_at', 'file_data', 'text']
+        fields = ['message_id', 'user', 'chat', 'sent_at', 'file_data', 'text', 'service_action']
         
         # 'sent_at' is read-only by default, because it has "auto_now_add=True",
         # but still we explicitly specify it here.
-        read_only_fields = ['message_id', 'sent_at', 'user', 'chat']
+        read_only_fields = ['message_id', 'sent_at', 'user', 'chat', 'service_action']
 
     def to_representation(self, instance):
         result = super().to_representation(instance)
         qp = self.context['query_params']
+        
+        if instance.service_action is None:
+            del result['service_action']
 
         if instance.file_data is None:
             del result['file_data']

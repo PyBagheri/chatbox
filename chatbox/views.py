@@ -2,6 +2,9 @@ from rest_framework import viewsets
 from rest_framework.permissions import IsAuthenticated
 
 
+from django.db import connection
+
+
 from chatbox.models import (
     Chat,
     Message
@@ -64,7 +67,10 @@ class ChatMessageViewSet(
         queryset = Message.objects.filter(chat=self.kwargs['chat'])
         
         if qp['unread']:
-            queryset = queryset.unread()
+            queryset = queryset.unread(
+                chat=self.kwargs['chat'],
+                user=self.request.user
+            )
             
         return queryset
 
@@ -102,7 +108,7 @@ class ChatViewSet(viewsets.ModelViewSet):
         ).annotate_last_message(
             include_user=True
         )
-    
+        
     @list_viewset_action(ChatMessageViewSet, actions=['list', 'create'], detail=True)
     def message(self, request, chat_id):
         return {
@@ -124,7 +130,6 @@ class MessageViewSet(
 ):
     """A viewset for the messages from the chats that the authenticated user is a member of."""
     
-    # `message_id` is the UUID, not the sequential id.
     lookup_field = 'message_id'
     lookup_url_kwarg = 'message_id'
     
@@ -133,6 +138,9 @@ class MessageViewSet(
     pagination_class = MessagePagination
     
     def get_queryset(self):
+        # Note that this ViewSet does NOT support listing, as otherwise
+        # this queryset would be quite resource-intensive. This is only
+        # for checks to make sure the user has access to the message.
         return Message.objects.for_user(self.request.user)
     
     def get_serializer_context(self):

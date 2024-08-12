@@ -1,7 +1,20 @@
 from django.db import models
 from django.db.models.constants import LOOKUP_SEP
+from django.contrib.postgres.expressions import ArraySubquery
 
 import chatbox.models
+
+
+class Any(models.Lookup):
+    lookup_name = 'any'
+    
+    def as_sql(self, compiler, connection):
+        lhs, lhs_params = self.process_lhs(compiler, connection)
+        rhs, rhs_params = self.process_rhs(compiler, connection)
+        params = list(lhs_params) + list(rhs_params)
+        return "%s = ANY(%s)" % (lhs, rhs), params
+
+models.Field.register_lookup(Any)
 
 
 class AdvancedQuerySet(models.QuerySet):
@@ -190,7 +203,49 @@ class AdvancedQuerySet(models.QuerySet):
 
 class ChatQuerySet(AdvancedQuerySet):
     def of_user(self, user):
-        return self.filter(members=user)
+        # This generates something like:
+        # `... WHERE chatbox_chat.id = ANY( ARRAY( ... ) ) ...`
+        #
+        # This is an unusual optimization. It basically forces PostgreSQL to first
+        # find the ID's of all the chats that the user is a member of, and then get
+        # each chat using the index for its ID. It can also affect joins on further
+        # tables later (such as preventing a hash join to messages when retrieving
+        # the last message for each chat. I don't know why this happens). There are
+        # other techniques to force PostgreSQL to first retrieve the list of all
+        # the chat ID's for the user, such as the `OFFSET 0` hack or materialized
+        # CTE's, but the `array` version also affects further joins (as noted above)
+        # in a way that makes them faster (I don't know why it affects them this way).
+        #
+        # For just returning the chats that the user is a member of, PostgreSQL seems
+        # to choose the efficient plan, but the materialized query (using array(...) or
+        # materialized CTE's or `OFFSET 0`) makes it faster. However, when it comes to
+        # joining to further tables (such as for when we want to get the last message
+        # for each chat) the `array` version makes a lot of difference (even the other
+        # materialized versions fail to make it faster. It seems that the array trick
+        # is the only way).
+        # 
+        # For ONLY returning the chats that the user is a member of (without further joins),
+        # if the data is big enough, PostgreSQL usually chooses one of these plans:
+        #
+        # 1. retrieve all the memberships and then find each chat by an index scan
+        #    using the chat's ID. This seems to be better most of the time and is
+        #    what we intend for.
+        # 2. a merge join with a index scan for *all* the chats and the memberships
+        #    of the specified user. Usually when PostgreSQL chooses this, it actually
+        #    performs well, but is slower than (1).
+        # 3. a hash join with a FULL sequence scan on the chats table. This makes the
+        #    execution even slower.
+        #
+        # This needs further investigation to understand why PostgreSQL does these.
+        # The above information are tested in PostgreSQL 14 and 17-beta3.
+        #
+        # Finally, it should be noted that the plans are heavily data-dependent. Also
+        # our assumption is that each user is member of only a couple of thousand chats
+        # on average. Also checking if an item is in an array or not must be one with
+        # the `= ANY(...)` operator, so we had to implement it manually above.
+        return self.filter(id__any=ArraySubquery(
+            chatbox.models.Membership.objects.filter(user=user).values('chat_id')
+        ))
         
     def annotate_last_message(self, include_user=False):
         backward_annotation_relations = ['message']
@@ -204,16 +259,16 @@ class ChatQuerySet(AdvancedQuerySet):
         # optimized (with the help of a proper index on messages).
         #
         # By specifying a filter on the backward relation `message`,
-        # Django will perform a LEFT OUTER JOIN from the chat to the
-        # messages in that chat, which will cause the chat rows to be
-        # duplicated to cover all the messages, but only one row will
-        # be returned per chat (the one attached to its last message)
-        # by the use of the specified condition.
+        # Django will perform a JOIN from the chat to the messages in
+        # that chat, which will cause the chat rows to be duplicated
+        # to cover all the messages, but only one row will be returned
+        # per chat (the one attached to its last message) by the use of
+        # the specified condition.
         return self.filter(
             message=models.Subquery(
                 chatbox.models.Message.objects.filter(
                     chat=models.OuterRef('pk')
-                ).order_by('-sent_at', '-message_id').only('pk')[:1]
+                ).order_by('-message_id').values('pk')[:1]
             )
         ).annotate_backward_related(
             *backward_annotation_relations,
@@ -236,42 +291,25 @@ class MessageQuerySet(models.QuerySet):
         certain operations that are basically full table scans (at least for
         PostgreSQL).
         """
+        # Unlike the case of `ChatQuerySet.of_user()`, we don't need manual
+        # optimizations for this, because it's only intended as a permission
+        # check for retrieveing a SINGLE message (as explained in the docstring).
         return self.filter(
             chat__members=user
         )
     
     def unread(self, *, chat, user):
         """Return the messages in `chat` which are unread for `user`."""
-        
-        # ROW() is bascially the same as a tuple in this case.
-        # In fact in PostgreSQL, (t1, t2, ..., tn) is equivalent
-        # to ROW(t1, t2, ..., tn) when n > 1. For n = 1, we have
-        # to explicitly use the ROW().
-        sent_at_and_message_id_row_construct = models.Func(
-            models.F('sent_at'),
-            models.F('message_id'),
-            function='ROW',
-            
-            # This is dummy; just to keep Django from complaining.
-            output_field=models.TextField()
-        )
-        
-        return self.alias(
-            sent_at_and_message_id_tuple=sent_at_and_message_id_row_construct
-        ).filter(
+
+        return self.filter(
             chat=chat,
             
-            # This can be thought of as a union of two queries:
-            # 1. The messages of the given chat where the timestamp equals
-            #    `last_seen_message_datetime` but the message uuid is greater
-            #    than `last_seen_message_id`.
-            # 2. The messages of the given chat where the timestamp is greater
-            #    than `last_seen_message_datetime`.
-            #
-            # We achieve this by this tuple comparison.
-            sent_at_and_message_id_tuple__gte=models.Subquery(
+            # `message_id` has the timestamp as part of it, so we can sort the
+            # messages based on it. See `chatbox.utils.generate_message_id` for
+            # more details.
+            message_id__gt=models.Subquery(
                 chatbox.models.Membership.objects.filter(
                     user=user, chat=chat
-                ).values('last_seen_message_datetime', 'last_seen_message_id')
+                ).values('last_seen_message_id')
             )
         )

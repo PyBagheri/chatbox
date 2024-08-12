@@ -1,3 +1,4 @@
+from typing import Iterable
 from django.db import models
 from django.conf import settings
 from django.contrib.postgres.fields import ArrayField
@@ -12,12 +13,12 @@ from chatbox.querysets import (
     ChatQuerySet,
     MessageQuerySet
 )
-from chatbox.utils import chatbox_settings
+from chatbox.utils import (
+    chatbox_settings,
+    generate_message_id
+)
 
 from pathlib import Path
-
-
-ALL_ZERO_UUID = uuid.UUID('00000000-0000-0000-0000-000000000000')
 
 
 class Chat(models.Model):
@@ -66,6 +67,12 @@ class GroupChatInfo(models.Model):
 
 
 class Membership(models.Model):
+    class Meta:
+        constraints = [
+            # Used for finding the chats that a user is a member of.
+            models.UniqueConstraint('user_id', 'chat_id', name='membership_userid_chatid_idx')
+        ]
+    
     # In case a user is deleted, we want to keep the membership as a "ghost" user.
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
                              blank=True, null=True)
@@ -75,12 +82,10 @@ class Membership(models.Model):
     
     joined_at = models.DateTimeField(auto_now_add=True)
 
-    # This is used to determine and filter for new messages.
-    # We're storing these separately because the message itself
-    # might be deleted. Also in case two messages have the same
-    # datetime, we'll use their UUID to order them.
-    last_seen_message_datetime = models.DateTimeField(default=timezone.now)
-    last_seen_message_id = models.UUIDField(default=ALL_ZERO_UUID)
+    # This is used to determine and filter for new messages. We use '0'
+    # as default as all `message_id` strings will compare to be greater
+    # than '0' since their first hex digit is always greater than 0.
+    last_seen_message_id = models.CharField(default='0', max_length=20)
 
 
 class AdminRole(models.Model):
@@ -135,22 +140,30 @@ def string_not_empty(string):
 class Message(models.Model):
     class ServiceMessageActionChoices(models.TextChoices):
         CREATE_CHAT = 'CC', 'Create Chat'
-    
+        
     class Meta:
-        indexes = [
+        constraints = [
+            # Notice that having a unique b-tree index rather than a normal
+            # b-tree index doesn't have an overhead, as the database has to
+            # scan the index to find the page to write it to anyways.
+            
+            models.UniqueConstraint('message_id', name='msg_msgid_unique_idx'),
+
             # Use cases:
-            # 1. Finding the last messages in a chat (this is why we have
-            #    descending orders on the second and third columns).
-            # 2. Pagination of messages in chats (the descending orders
-            #    don't make a problem here, because we can look at the
-            #    end of the index too).
-            models.Index(fields=['chat_id', '-sent_at', '-message_id'], name='msg_chatid_sentat_msgid_idx'),
+            # 1. Finding the last messages in a chat.
+            # 2. Pagination of messages in chats.
+            #
+            # Note that `message_id` has the timestamp as part of it, so we
+            # can do the sortings based entirely on `message_id`. See the
+            # function `chatbox.utils.generate_message_id`.
+            models.UniqueConstraint(fields=['chat_id', 'message_id'], name='msg_chatid_msgid_unique_idx'),
         ]
     
     # We leave the default sequential ID as the primary key.
-    # Also note that if two messages have the same timestamp,
-    # we sort them using their sequential ID.
-    message_id = models.UUIDField(unique=True, default=uuid.uuid4)
+    # We generate the `message_id` using the util function
+    # described `chatbox.utils`. See its docstring and comments
+    # for further information.
+    message_id = models.CharField(unique=True, max_length=20)
     
     # The cases where `user` might be blank:
     # 1. If the user is deleted, we want to keep their messages
@@ -162,7 +175,11 @@ class Message(models.Model):
     # If the chat itself is deleted, all the messages must also be deleted.
     chat = models.ForeignKey(Chat, on_delete=models.CASCADE)
     
-    sent_at = models.DateTimeField(auto_now_add=True)
+    # We don't specify `auto_now_add=True` here, and instead implement
+    # the logic in model's `save()` method. This is because otherwise
+    # we could not access its value which is necessary for generating
+    # the `message_id` field.
+    sent_at = models.DateTimeField()
     
     file_data = models.ForeignKey(
         FileData, on_delete=models.PROTECT,
@@ -181,3 +198,11 @@ class Message(models.Model):
                                       blank=True, null=True)
 
     objects = models.Manager.from_queryset(MessageQuerySet)()
+
+    def save(self, *args, **kwargs):
+        if not self.pk:  # upon creation
+            sent_at = timezone.now()
+            self.sent_at = sent_at
+            self.message_id = generate_message_id(sent_at)
+            
+        return super().save(*args, **kwargs)
